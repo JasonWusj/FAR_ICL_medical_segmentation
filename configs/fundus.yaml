@@ -1,0 +1,14 @@
+manifest: data/fundus/manifest.csv
+output: runs/fundus
+device: cuda
+encoder: resnet50
+segmenter: universeg
+# Set task to optic_disc / optic_cup / vessel consistently in the manifest.
+# Explicitly select class labels for your dataset (example: foreground 255).
+mask_values: [255]
+k: 4
+initial_k: 4
+candidate_n: 50
+feature_mode: full
+uncertainty: context
+surface_tolerance: 2.0

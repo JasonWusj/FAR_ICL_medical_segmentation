@@ -1,0 +1,5 @@
+case_id,patient_id,image_path,mask_path,split,task,domain,spacing_y,spacing_x
+case001,patient001,images/case001.png,masks/case001.png,train,lesion,center_a,1,1
+case002,patient002,images/case002.png,masks/case002.png,train,lesion,center_a,1,1
+case003,patient003,images/case003.png,masks/case003.png,val,lesion,center_b,1,1
+case004,patient004,images/case004.png,masks/case004.png,test,lesion,center_b,1,1
