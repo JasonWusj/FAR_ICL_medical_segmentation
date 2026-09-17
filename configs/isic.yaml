@@ -1,0 +1,24 @@
+# Paths are relative to the repository working directory; data paths inside CSV
+# are relative to that CSV. Use real patient identifiers from dataset metadata.
+manifest: data/isic/manifest.csv
+output: runs/isic
+seed: 42
+device: cuda
+encoder: resnet50
+segmenter: universeg
+k: 4
+initial_k: 4
+candidate_n: 50
+feature_mode: full
+uncertainty: context
+uncertainty_samples: 4
+max_k: 16
+set_trajectories: 2
+loss: pairwise
+regression_weight: 1.0
+epochs: 40
+lr: 0.0001
+hidden_dim: 256
+patience: 8
+surface_tolerance: 2.0
+mask_values: null

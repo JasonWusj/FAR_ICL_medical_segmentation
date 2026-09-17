@@ -1,0 +1,8 @@
+manifest: data/isic/manifest.csv
+output: runs/isic_tyche
+segmenter: tyche
+tyche_samples: 8
+uncertainty: tyche
+feature_mode: full
+encoder: resnet50
+device: cuda

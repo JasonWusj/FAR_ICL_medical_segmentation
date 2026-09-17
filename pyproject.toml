@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "far-icl"
+version = "0.1.0"
+description = "Failure-aware and set-conditioned retrieval for medical in-context segmentation"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2,<3", "torchvision>=0.17,<1", "numpy>=1.24,<3", "scipy>=1.10,<2", "Pillow>=10", "PyYAML>=6", "surface-distance>=0.1", "matplotlib>=3.7", "tqdm>=4.66"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+far-icl = "far_icl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["far_icl*"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
