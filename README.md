@@ -79,6 +79,43 @@ split 工具按患者随机分组；不是官方划分或分层划分的替代�
 `query_domains` 仅过滤 val/test；训练 query 的中心可另用 `train_query_domains` 配置。
 训练集每个 task 至少需要两个不同患者。验证和测试也必须有相同 task 的训练 support。
 
+#### ISIC 2018 Task 1：无患者 ID 时的图像级探索
+
+ISIC 2018 Task 1 官方图像与分割 mask 可按图像 ID 配对，但下载包不提供真实患者映射。
+因此仅在明确设置 `identity_scope=image` 时允许图像级探索；生成的 `patient_id` 带有
+`image:` 前缀，是**图像分组标记，不是真实患者 ID**。结果、provenance 和比较统计会记录
+`identity_scope=image`，使用图像级汇总/重采样。不能称为患者独立验证或正式结果。
+默认 `identity_scope=patient` 会拒绝这种清单，防止误用。此模式仍检查完全相同图像文件
+跨分组重复，但无法排除不同拍摄或重编码的同患者图像。
+
+下面的命令在 Featurize 的已解压官方 Task 1 目录生成小规模清单；路径可改为只读挂载目录。
+清单和输出目录必须位于可写的 `work` 目录。64/8 病例仅用于排查环境和流程，不能作为
+性能结论。首次运行会下载预训练权重，若只有约 18 GB 空余空间，请勿先运行默认 marginal
+监督或完整消融。
+
+```bash
+cd /home/featurize/work/FAR_ICL_medical_segmentation
+git pull
+DATA_ROOT=/home/featurize/work/datasets/isic2018_task1
+MANIFEST=/home/featurize/work/isic2018_pilot.csv
+OUT=/home/featurize/work/far_icl_runs/isic2018_pilot
+export K=2
+python3 scripts/prepare_isic2018_exploratory.py \
+  --data-root "$DATA_ROOT" --output "$MANIFEST" --train-limit 64 --val-limit 8
+COMMON=(--set identity_scope=image --set "manifest=$MANIFEST" --set "output=$OUT" \
+  --set candidate_n=12 --set initial_k=2 --set max_k=2 \
+  --set uncertainty_samples=2 --set epochs=8)
+bash scripts/check_data.sh "${COMMON[@]}"
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_knn.sh "${COMMON[@]}"
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_repair_cover.sh "${COMMON[@]}"
+bash scripts/report.sh --set "output=$OUT"
+```
+
+若命令在新的 shell/tmux 会话里运行，需重新设置 `MANIFEST`、`OUT`、`K` 和 `COMMON`。
+如需使用官方训练集 2594 张和验证集 100 张重新探索，生成另一份不带 `--train-limit`
+和 `--val-limit` 的清单，并使用新的 `output`，避免把小试验缓存和完整数据结果混合。
+只有取得真实患者映射并通过患者级隔离检查后，才使用默认 `identity_scope=patient`。
+
 可先在 Linux 上用指定病例执行一次接口 smoke test（本次未执行）：
 
 ```bash

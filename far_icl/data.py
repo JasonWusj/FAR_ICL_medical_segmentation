@@ -25,7 +25,9 @@ class Case:
     spacing_x: float = 1.0
 
 
-def read_manifest(path):
+def read_manifest(path, identity_scope="patient"):
+    if identity_scope not in {"patient", "image"}:
+        raise ValueError("identity_scope must be patient or image")
     path = Path(path).resolve()
     with path.open(newline="") as f:
         rows = list(csv.DictReader(f))
@@ -36,6 +38,11 @@ def read_manifest(path):
         for key in ("case_id", "patient_id", "image_path", "mask_path", "split", "task"):
             if not row.get(key):
                 raise ValueError(f"Missing required {key}: {row}")
+        image_identity = f"image:{row['case_id']}"
+        if identity_scope == "image" and row["patient_id"] != image_identity:
+            raise ValueError(f"Image-level exploration requires patient_id={image_identity}")
+        if identity_scope == "patient" and row["patient_id"].startswith("image:"):
+            raise ValueError("Image-level manifest requires --set identity_scope=image")
         if row["split"] not in {"train", "val", "test"}:
             raise ValueError("split must be train/val/test")
         for key in ("image_path", "mask_path"):

@@ -40,10 +40,11 @@ def main():
     if args.command == "check-data":
         from .data import load_case, read_manifest
 
-        cases = read_manifest(cfg["manifest"])
+        cases = read_manifest(cfg["manifest"], cfg["identity_scope"])
         for case in cases:
             load_case(case, cfg)
-        print({s: sum(c.split == s for c in cases) for s in ("train", "val", "test")})
+        counts = {split: sum(c.split == split for c in cases) for split in ("train", "val", "test")}
+        print({"identity_scope": cfg["identity_scope"], **counts})
         return
     if args.command == "report":
         from .report import report
