@@ -13,6 +13,7 @@ import yaml
 DEFAULTS = dict(
     manifest="data/manifest.csv",
     output="runs/isic",
+    identity_scope="patient",
     seed=42,
     device="cuda",
     image_size=128,
@@ -76,6 +77,8 @@ def load_config(path, overrides=()):
             raise ValueError(f"{key} must be positive")
     if cfg["image_size"] != 128:
         raise ValueError("This implementation follows the 128x128 backbone protocol")
+    if cfg["identity_scope"] not in {"patient", "image"}:
+        raise ValueError("identity_scope must be patient or image")
     if cfg["feature_mode"] not in {"image", "shape", "boundary", "failure", "full"}:
         raise ValueError("Unknown feature_mode")
     if cfg["uncertainty"] not in {"none", "context", "tta", "tyche"}:

@@ -53,23 +53,32 @@ def report(output):
     print(root / "results.csv")
 
 
-def paired_patient_bootstrap(rows_a, rows_b, seed=42, samples=2000):
-    """Case-aligned, patient-clustered CI for Dice(B)-Dice(A)."""
+def paired_identity_bootstrap(rows_a, rows_b, identity_scope="patient", seed=42, samples=2000):
+    """Case-aligned CI; cluster by patient or by image for exploratory runs."""
+    if identity_scope not in {"patient", "image"}:
+        raise ValueError("identity_scope must be patient or image")
     a, b = {r["case_id"]: r for r in rows_a}, {r["case_id"]: r for r in rows_b}
     if a.keys() != b.keys():
         raise ValueError("Paired comparison requires identical query cases")
-    patients = {}
+    groups = {}
     for case_id, row in a.items():
         if row["patient_id"] != b[case_id]["patient_id"]:
-            raise ValueError("Patient metadata mismatch")
-        patients.setdefault(row["patient_id"], []).append(b[case_id]["dice"] - row["dice"])
-    values = np.array([np.mean(v) for v in patients.values()])
+            raise ValueError("Identity metadata mismatch")
+        groups.setdefault(row["patient_id"], []).append(b[case_id]["dice"] - row["dice"])
+    values = np.array([np.mean(v) for v in groups.values()])
     if not len(values):
         raise ValueError("Empty comparison")
     rng = np.random.default_rng(seed)
     means = [rng.choice(values, len(values), replace=True).mean() for _ in range(samples)]
+    label = "patient" if identity_scope == "patient" else "image"
     return {
-        "patient_macro_delta": float(values.mean()),
+        "identity_scope": identity_scope,
+        f"{label}_macro_delta": float(values.mean()),
         "ci95": np.quantile(means, [0.025, 0.975]).tolist(),
-        "n_patients": len(values),
+        f"n_{label}s": len(values),
     }
+
+
+def paired_patient_bootstrap(rows_a, rows_b, seed=42, samples=2000):
+    """Backward-compatible patient-clustered comparison."""
+    return paired_identity_bootstrap(rows_a, rows_b, "patient", seed, samples)

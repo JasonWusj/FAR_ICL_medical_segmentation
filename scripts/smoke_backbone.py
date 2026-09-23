@@ -22,7 +22,7 @@ def main():
     args = p.parse_args()
     cfg = load_config(args.config, args.set)
     seed_all(cfg["seed"])
-    cases = {c.case_id: c for c in read_manifest(cfg["manifest"])}
+    cases = {c.case_id: c for c in read_manifest(cfg["manifest"], cfg["identity_scope"])}
     q, support_cases = cases[args.query], [cases[s] for s in args.support]
     if len(set(args.support)) != len(args.support):
         p.error("Duplicate supports")

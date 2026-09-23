@@ -107,6 +107,32 @@ def test_patient_leakage_rejected(tmp_path):
         read_manifest(path)
 
 
+def test_image_exploration_requires_explicit_scope(tmp_path):
+    path = write_manifest(tmp_path, ["image:0", "image:1"], ["train", "val"])
+    with pytest.raises(ValueError, match="identity_scope=image"):
+        read_manifest(path)
+    cases = read_manifest(path, identity_scope="image")
+    assert [case.patient_id for case in cases] == ["image:0", "image:1"]
+    wrong = write_manifest(tmp_path, ["patient1", "patient2"], ["train", "val"])
+    with pytest.raises(ValueError, match="Image-level exploration"):
+        read_manifest(wrong, identity_scope="image")
+
+
+def test_image_level_statistics_are_not_labeled_patient_level():
+    from far_icl.pipeline import summarize
+    from far_icl.report import paired_identity_bootstrap
+
+    a = [dict(case_id="a", patient_id="image:a", dice=0.4, hd95=1.0)]
+    b = [dict(case_id="a", patient_id="image:a", dice=0.6, hd95=1.0)]
+    summary = summarize(b, identity_scope="image")
+    assert summary["identity_scope"] == "image"
+    assert "patient_macro_dice" not in summary
+    assert summary["image_macro_dice"] == pytest.approx(0.6)
+    delta = paired_identity_bootstrap(a, b, identity_scope="image", samples=10)
+    assert delta["image_macro_delta"] == pytest.approx(0.2)
+    assert "patient_macro_delta" not in delta
+
+
 def test_duplicate_image_leakage_rejected(tmp_path):
     path = write_manifest(tmp_path, ["patient1", "patient2"], ["train", "val"], identical=True)
     with pytest.raises(ValueError, match="duplicated"):

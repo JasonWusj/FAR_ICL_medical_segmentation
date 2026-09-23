@@ -34,7 +34,7 @@ class Pipeline:
         self.device = torch.device(cfg["device"])
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA unavailable; explicitly use --set device=cpu if intended")
-        self.cases = read_manifest(cfg["manifest"])
+        self.cases = read_manifest(cfg["manifest"], cfg["identity_scope"])
         self.manifest_hash = manifest_signature(self.cases)
         self.encoder = ImageEncoder(cfg).to(self.device).eval()
         self.bank = CaseBank(self.cases, cfg, self.encoder, self.manifest_hash)
@@ -52,6 +52,7 @@ class Pipeline:
             h.update(value.detach().cpu().contiguous().numpy().tobytes())
         keys = (
             "seed",
+            "identity_scope",
             "candidate_n",
             "initial_k",
             "uncertainty",
@@ -255,6 +256,7 @@ class Pipeline:
             dict(
                 signature=self.signature_for(ranker_kind(method)),
                 manifest_hash=self.manifest_hash,
+                identity_scope=self.cfg["identity_scope"],
                 git_revision=revision.stdout.strip() or "uncommitted",
                 python=platform.python_version(),
                 torch=torch.__version__,
@@ -384,11 +386,14 @@ class Pipeline:
                 )
         write_json(
             dict(
-                signature=self.signature_for(ranker_kind(method)), manifest_hash=self.manifest_hash, rows=rows
+                signature=self.signature_for(ranker_kind(method)),
+                manifest_hash=self.manifest_hash,
+                identity_scope=self.cfg["identity_scope"],
+                rows=rows,
             ),
             result_dir / "per_case.json",
         )
-        summary = summarize(rows)
+        summary = summarize(rows, self.cfg["identity_scope"])
         write_json(summary, result_dir / "summary.json")
         print(summary)
         return result_dir
@@ -426,26 +431,28 @@ class Pipeline:
                 rows=rows,
                 signature=self.signature,
                 uses_query_ground_truth=True,
+                identity_scope=self.cfg["identity_scope"],
                 protocol="single-support, shared random candidate pool",
             ),
             path / "oracle.json",
         )
-        write_json(
-            {
-                key: float(np.mean([r[key] for r in rows]))
-                for key in ("random", "random_expected", "knn", "oracle", "worst", "gap")
-            },
-            path / "summary.json",
-        )
+        oracle_summary = {
+            key: float(np.mean([r[key] for r in rows]))
+            for key in ("random", "random_expected", "knn", "oracle", "worst", "gap")
+        }
+        write_json({"identity_scope": self.cfg["identity_scope"], **oracle_summary}, path / "summary.json")
         return path
 
 
-def summarize(rows):
+def summarize(rows, identity_scope="patient"):
     result = {
         "n_cases": len(rows),
-        "n_patients": len({r["patient_id"] for r in rows}),
+        "identity_scope": identity_scope,
         "hd95_undefined_cases": sum(r["hd95"] is None for r in rows),
     }
+    result["n_patients" if identity_scope == "patient" else "n_images"] = len(
+        {r["patient_id"] for r in rows}
+    )
     for key in (
         "dice",
         "iou",
@@ -468,9 +475,11 @@ def summarize(rows):
         values = [r[key] for r in rows if r.get(key) is not None]
         if values:
             result[key] = dict(mean=float(np.mean(values)), std=float(np.std(values)), n=len(values))
-    patient_dice = [
-        np.mean([r["dice"] for r in rows if r["patient_id"] == patient])
-        for patient in sorted({r["patient_id"] for r in rows})
+    group_dice = [
+        np.mean([r["dice"] for r in rows if r["patient_id"] == group])
+        for group in sorted({r["patient_id"] for r in rows})
     ]
-    result["patient_macro_dice"] = float(np.mean(patient_dice))
+    result["patient_macro_dice" if identity_scope == "patient" else "image_macro_dice"] = float(
+        np.mean(group_dice)
+    )
     return result
