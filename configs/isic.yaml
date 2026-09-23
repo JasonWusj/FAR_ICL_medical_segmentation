@@ -22,3 +22,8 @@ hidden_dim: 256
 patience: 8
 surface_tolerance: 2.0
 mask_values: null
+# Regional repair/harm supervision: 4x4 query regions, per-candidate labels.
+correction_grid: 4
+correction_harm_weight: 1.0
+correction_uncertainty_weight: 0.0
+correction_cost: 0.001

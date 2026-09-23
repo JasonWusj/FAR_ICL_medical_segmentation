@@ -20,6 +20,9 @@
 | Set-conditioned marginal utility | `bash scripts/run_set.sh` | 是，集合条件 MLP |
 | Uncertainty Adaptive-K + MMR | `bash scripts/run_adaptive.sh` | 是，utility |
 | Learned stopping Adaptive-K | `bash scripts/run_adaptive_learned.sh` | 是，marginal utility |
+| 区域修复/损害排序 | `bash scripts/run_repair.sh` | 是，区域修复/损害预测 |
+| 纠错覆盖互补选集 | `bash scripts/run_repair_cover.sh` | 是，复用区域模型 |
+| 纠错收益自适应停止 | `bash scripts/run_repair_adaptive.sh` | 是，复用区域模型 |
 | Appearance / Morphology / Failure roles | `bash scripts/run_roles.sh` | 否，最多 3 个不同病例 |
 | Oracle gap | `bash scripts/oracle.sh` | 否，仅使用 GT 的诊断 |
 | Tyche-TS backbone / uncertainty | `bash scripts/run_tyche.sh` | 默认 utility + MMR |
@@ -95,14 +98,19 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_utility.sh
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_mmr.sh
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_set.sh
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_adaptive_learned.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_repair.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_repair_cover.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_repair_adaptive.sh
 
 # 仅训练；自动生成 train/val 监督，可断点恢复
 bash scripts/train_utility.sh
 bash scripts/train_marginal.sh
+bash scripts/train_correction.sh
 
 # 仅验证已训练模型；自动按当前配置定位 checkpoint
 bash scripts/eval_utility.sh
 bash scripts/eval_set.sh
+bash scripts/eval_repair_cover.sh
 # 或指定已有 checkpoint
 bash scripts/eval_set.sh --checkpoint /absolute/path/to/best.pt
 
@@ -144,7 +152,11 @@ INSTALL_TYCHE=1 bash scripts/setup_linux.sh
 METHOD=set bash scripts/run_tyche.sh
 ```
 
-消融涵盖 K=1/2/4/8/16、五组特征、三种 uncertainty、三种 loss、各选择策略、one/two-pass。
+消融涵盖 K=1/2/4/8/16、五组特征、三种 uncertainty、三种 loss、各选择策略、one/two-pass，
+以及新模块的区域修复排序 / 纠错覆盖 / 自适应停止、harm 权重和 uncertainty 权重。
+区域模型默认使用 4×4 网格；`--set correction_grid=8` 可检验空间粒度。
+`correction_harm_weight` 控制新出错像素的惩罚；`correction_cost` 控制预测边际纠错收益的停止阈值。
+这些参数只能在验证集选择，测试集不再调整。
 Tyche uncertainty 使用独立脚本和配置，避免默认消融强制安装第二 backbone。
 
 ### 4. 结果与分析
@@ -165,12 +177,15 @@ runs/<dataset>/
     best.pt, last.pt, history.json
   results/<run>/
     config.json, provenance.json, per_case.json, summary.json
-    *_mask.png, *_maps.npz                   # 可关闭 save_predictions
+    *_mask.png, *_maps.npz, *_explanation.png # 可关闭 save_predictions
   results.csv, dice_comparison.png
 ```
 
 指标：Dice、IoU、HD95、surfel-weighted NSD、患者宏平均 Dice、diversity、实际 K、
 初次/二次分割收益、总时间、分割时间、其余检索流程时间、分割调用数、累计 support 使用数、GPU 峰值。
+新区域方法额外输出原错误像素修复比例、原正确像素损害比例、二次分割 Dice 下降病例比例，
+并在每个 query 保存所选病例的区域修复/损害预测和 `*_explanation.png` 对照图。两类比例除以全图像素数，
+两者之差等于像素准确率变化，**不等于 Dice 变化**。
 `retrieval_diagnostics=true` 额外输出所选病例单独分割 Dice 均值 `Utility@K`，
 其计算不计入正常推理时间。它与最终集合 Dice 含义不同。
 对空集：双方为空 Dice/IoU/NSD=1、HD95=0；单方为空 NSD=0、HD95=null，汇总显式报告缺失数量。
@@ -185,6 +200,7 @@ Oracle 仅是**相同随机候选池、K=1** 内上界，不能当作不同候�
 - `features.py`：ResNet50 / DINOv2、边界/困难区域池化、10 维 morphology descriptor。
 - `segmentation.py / tyche_adapter.py`：冻结 UniverSeg 与官方 Tyche-TS。
 - `retrieval.py`：utility MLP、regression/pairwise/listwise、MMR、集合条件选择与停止。
+- `correction.py`：区域修复/损害双目标、纠错覆盖选集与代价感知停止。
 - `pipeline.py`：统一监督生成、label-free 检索、评估与 oracle。
 - `training.py`：按 query/state 排序、验证、恢复和 checkpoint。
 - `report.py`：结果表、图及 patient-clustered bootstrap。
@@ -200,6 +216,11 @@ python3 scripts/static_check.py        # 无第三方依赖，不加载模型
 本次仅执行静态检查，测试文件已提供但没有运行依赖 PyTorch 的测试。
 目标硬件上的安装、单样本接口 smoke test、训练收敛、完整消融须在实际服务器验证。
 所有方法贡献是待验证的研究假设，不代表已证明的新颖性或性能优势。
+区域修复/损害监督使用单候选相对于粗预测的变化；互补覆盖是选集代理目标，
+不保证联合支持集的 Dice 提升、次模性或医学安全。
+新增监督按 query 保存基本特征、候选 ID、4×4 小型修复/损害标签，训练时按 ID 从病例库重建输入；
+不把每个候选×区域的展开向量落盘，缓解此前 marginal 展开缓存占用。
+原 `marginal` 监督仍采用展开格式，约 350 GB 的默认估算并未因这项新增创新自动下降。
 UniverSeg 的预训练数据重叠必须按官方 MegaMedical 列表审计，未经核对不能声称 unseen task。
 128×128 评估可能损失微小结构；本文实现是 2D 单目标协议，3D 切片工程与学习式 shape CNN 属于后续扩展。
 
