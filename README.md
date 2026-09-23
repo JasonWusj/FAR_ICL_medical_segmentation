@@ -116,6 +116,20 @@ bash scripts/report.sh --set "output=$OUT"
 和 `--val-limit` 的清单，并使用新的 `output`，避免把小试验缓存和完整数据结果混合。
 只有取得真实患者映射并通过患者级隔离检查后，才使用默认 `identity_scope=patient`。
 
+官方 Task 1 另有 1000 张测试图及对应分割 mask。要做一次独立的图像级测试，先下载并
+解压 `ISIC2018_Task1-2_Test_Input.zip` 和 `ISIC2018_Task1_Test_GroundTruth.zip` 到同一
+`DATA_ROOT`，然后在**训练之前**用 `--include-test` 生成包含 train/val/test 的新清单：
+
+```bash
+python3 scripts/prepare_isic2018_exploratory.py \
+  --data-root "$DATA_ROOT" --output /home/featurize/work/isic2018_full_with_test.csv --include-test
+```
+
+必须用此清单和新的 `output` 从头生成监督、训练并验证，随后才运行
+`SPLIT=test bash scripts/eval_knn.sh ...`、`SPLIT=test bash scripts/eval_repair.sh ...`。
+清单内容参与缓存和 checkpoint 指纹，因此不能把测试行临时追加到已训练的旧清单后
+直接复用旧 checkpoint。测试集只用于最终评估；不在测试集上调阈值或选择方法。
+
 可先在 Linux 上用指定病例执行一次接口 smoke test（本次未执行）：
 
 ```bash
