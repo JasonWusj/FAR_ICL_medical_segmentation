@@ -11,7 +11,7 @@ import random
 from pathlib import Path
 
 
-EXPECTED = {"Training": 2594, "Validation": 100}
+EXPECTED = {"Training": 2594, "Validation": 100, "Test": 1000}
 FIELDS = (
     "case_id",
     "patient_id",
@@ -69,19 +69,23 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--val-limit", type=int, default=None)
+    parser.add_argument(
+        "--include-test", action="store_true", help="Include the official 1000-image Task 1 test set"
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     root, output = args.data_root.resolve(), args.output.resolve()
     train = select(paired_cases(root, "Training", "train"), args.train_limit, args.seed)
     val = select(paired_cases(root, "Validation", "val"), args.val_limit, args.seed)
+    test = paired_cases(root, "Test", "test") if args.include_test else []
     if len(train) < 2:
         parser.error("At least two training images are required")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
-        writer.writerows(train + val)
-    print(f"Wrote {output}: {len(train)} train images, {len(val)} val images")
+        writer.writerows(train + val + test)
+    print(f"Wrote {output}: {len(train)} train, {len(val)} val, {len(test)} test images")
     print("Exploratory IMAGE-level identity only. Do not report patient-level validation.")
 
 
