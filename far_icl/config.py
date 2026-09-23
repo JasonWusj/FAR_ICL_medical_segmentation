@@ -54,6 +54,10 @@ DEFAULTS = dict(
     train_query_domains=[],
     deterministic=True,
     retrieval_diagnostics=False,
+    correction_grid=4,
+    correction_harm_weight=1.0,
+    correction_uncertainty_weight=0.0,
+    correction_cost=0.001,
 )
 
 
@@ -97,6 +101,11 @@ def load_config(path, overrides=()):
         raise ValueError("Invalid surface_tolerance or hidden_dim")
     if cfg["uncertainty"] == "tyche" and cfg["segmenter"] != "tyche":
         raise ValueError("Tyche uncertainty requires segmenter=tyche")
+    if cfg["correction_grid"] not in {1, 2, 4, 8, 16}:
+        raise ValueError("correction_grid must be one of 1,2,4,8,16")
+    for key in ("correction_harm_weight", "correction_uncertainty_weight", "correction_cost"):
+        if not np.isfinite(cfg[key]) or cfg[key] < 0:
+            raise ValueError(f"{key} must be finite and nonnegative")
     return cfg
 
 

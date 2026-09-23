@@ -17,7 +17,14 @@ from .metrics import dice, diversity, segmentation_metrics
 from .retrieval import UtilityRanker, select
 from .segmentation import Segmenter, estimate_uncertainty
 
-LEARNED = {"utility", "mmr", "set", "adaptive", "adaptive_learned"}
+CORRECTION_METHODS = {"repair", "repair_cover", "repair_adaptive"}
+LEARNED = {"utility", "mmr", "set", "adaptive", "adaptive_learned"} | CORRECTION_METHODS
+
+
+def ranker_kind(method):
+    if method in CORRECTION_METHODS:
+        return "correction"
+    return "marginal" if method in {"set", "adaptive_learned"} else "utility"
 
 
 class Pipeline:
@@ -66,6 +73,14 @@ class Pipeline:
         )
         self.artifacts = Path(cfg["output"]) / "supervision" / self.signature[:20]
 
+    def signature_for(self, kind):
+        if kind == "correction":
+            return digest(dict(base=self.signature, grid=self.cfg["correction_grid"], correction_schema=1))
+        return self.signature
+
+    def artifact_dir(self, kind):
+        return Path(self.cfg["output"]) / "supervision" / self.signature_for(kind)[:20] / kind
+
     def queries(self, split):
         domains = self.cfg["train_query_domains"] if split == "train" else self.cfg["query_domains"]
         cases = [c for c in self.cases if c.split == split and (not domains or c.domain in domains)]
@@ -80,7 +95,7 @@ class Pipeline:
         return np.random.default_rng(seed)
 
     @torch.no_grad()
-    def context(self, case, random_candidates=False, need_failure=True):
+    def context(self, case, random_candidates=False, need_failure=True, with_regions=False):
         rng = self.rng_for(case)
         data = load_case(case, self.cfg, with_mask=False)
         z, fmap = self.encoder(data["rgb"][None].to(self.device))
@@ -98,23 +113,55 @@ class Pipeline:
             pred = torch.zeros_like(data["image"], device=self.device)
             uncertainty = torch.zeros_like(pred)
         query = describe(z[0], fmap[0], pred, uncertainty, self.cfg["hard_quantile"])
+        if with_regions:
+            from .correction import regional_state
+
+            data["regional_state"] = regional_state(fmap[0], pred, uncertainty, self.cfg["correction_grid"])
         return data, query, candidates, features, rng, pred, uncertainty
 
     @torch.no_grad()
     def generate(self, kind, split, force=False):
         if split not in {"train", "val"}:
             raise ValueError("Test labels must never generate training/validation supervision")
-        target = self.artifacts / kind / split
+        target = self.artifact_dir(kind) / split
         target.mkdir(parents=True, exist_ok=True)
         for case in tqdm(self.queries(split), desc=f"Generate {kind}/{split}"):
             output = target / f"{digest(case.case_id)}.pt"
             if output.exists() and not force:
                 continue
-            data, query, candidates, features, rng, _, _ = self.context(
-                case, need_failure=self.cfg["feature_mode"] != "image"
+            data, query, candidates, features, rng, initial, _ = self.context(
+                case,
+                need_failure=kind == "correction" or self.cfg["feature_mode"] != "image",
+                with_regions=kind == "correction",
             )
             truth = load_case(case, self.cfg)["mask"].to(self.device)
             groups = []
+            if kind == "correction":
+                from .correction import correction_targets
+
+                targets = []
+                for candidate in candidates:
+                    refined = self.segmenter(data["image"], [candidate])
+                    targets.append(
+                        correction_targets(initial, refined, truth, self.cfg["correction_grid"]).cpu()
+                    )
+                # Reuse bank features by ID. Never persist N x regions expanded inputs.
+                atomic_save(
+                    dict(
+                        query={key: value.cpu() for key, value in query.items()},
+                        regional_state=data["regional_state"].cpu(),
+                        candidate_ids=[c["case"]["case_id"] for c in candidates],
+                        targets=torch.stack(targets),
+                        case_id=case.case_id,
+                        patient_id=case.patient_id,
+                        split=split,
+                        kind=kind,
+                        signature=self.signature_for(kind),
+                        storage="indexed-correction-v1",
+                    ),
+                    output,
+                )
+                continue
             if kind == "utility":
                 x = torch.stack([pair_features(query, f, self.cfg["feature_mode"]) for f in features])
                 y = torch.tensor([dice(self.segmenter(data["image"], [c]), truth) for c in candidates])
@@ -163,7 +210,12 @@ class Pipeline:
                 output,
             )
         write_json(
-            dict(signature=self.signature, kind=kind, split=split, query_count=len(self.queries(split))),
+            dict(
+                signature=self.signature_for(kind),
+                kind=kind,
+                split=split,
+                query_count=len(self.queries(split)),
+            ),
             target / "metadata.json",
         )
         return target
@@ -174,10 +226,15 @@ class Pipeline:
         if not path:
             raise ValueError(f"{method} requires --checkpoint")
         checkpoint = read_tensor(path)
-        expected = "marginal" if method in {"set", "adaptive_learned"} else "utility"
-        if checkpoint["kind"] != expected or checkpoint["signature"] != self.signature:
+        expected = ranker_kind(method)
+        if checkpoint["kind"] != expected or checkpoint["signature"] != self.signature_for(expected):
             raise ValueError("Checkpoint type/provenance mismatch; use matching config and bank")
-        model = UtilityRanker(checkpoint["input_dim"], checkpoint["hidden_dim"]).to(self.device)
+        if expected == "correction":
+            from .correction import CorrectionRanker
+
+            model = CorrectionRanker(checkpoint["input_dim"], checkpoint["hidden_dim"]).to(self.device)
+        else:
+            model = UtilityRanker(checkpoint["input_dim"], checkpoint["hidden_dim"]).to(self.device)
         model.load_state_dict(checkpoint["model"])
         return model.eval()
 
@@ -196,7 +253,7 @@ class Pipeline:
         revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
         write_json(
             dict(
-                signature=self.signature,
+                signature=self.signature_for(ranker_kind(method)),
                 manifest_hash=self.manifest_hash,
                 git_revision=revision.stdout.strip() or "uncommitted",
                 python=platform.python_version(),
@@ -213,15 +270,29 @@ class Pipeline:
                 torch.cuda.reset_peak_memory_stats(self.device)
             self.segmenter.sync()
             start = time.perf_counter()
-            need_failure = method in {"shape", "roles", "adaptive"} or (
+            need_failure = method in {"shape", "roles", "adaptive"} | CORRECTION_METHODS or (
                 method not in {"random", "knn"} and self.cfg["feature_mode"] != "image"
             )
             data, query, candidates, features, rng, pred0, uncertainty = self.context(
-                case, random_candidates=method == "random", need_failure=need_failure
+                case,
+                random_candidates=method == "random",
+                need_failure=need_failure,
+                with_regions=method in CORRECTION_METHODS,
             )
             gains = []
+            regional_predictions = None
             if method in {"random", "knn"}:
                 selected = list(range(min(self.cfg["k"], len(candidates))))
+            elif method in CORRECTION_METHODS:
+                from .correction import correction_inputs, select_corrections
+
+                inputs = correction_inputs(query, features, data["regional_state"], self.cfg["feature_mode"])
+                regional_predictions = ranker(inputs)
+                # Last five region channels: probability, uncertainty, boundary, y, x.
+                region_uncertainty = data["regional_state"][:, -4]
+                selected, gains = select_corrections(
+                    regional_predictions, region_uncertainty, self.cfg, method
+                )
             elif method == "roles":
                 # Distinct supports for appearance, morphology and failure roles.
                 selected = [0]
@@ -268,6 +339,16 @@ class Pipeline:
             if need_failure:
                 row["initial_dice"] = dice(pred0.cpu(), truth)
                 row["second_pass_gain"] = row["dice"] - row["initial_dice"]
+                initial_correct = (pred0.cpu() > 0.5) == (truth > 0.5)
+                final_correct = (prediction.cpu() > 0.5) == (truth > 0.5)
+                row["repair_fraction"] = float((~initial_correct & final_correct).float().mean())
+                row["harm_fraction"] = float((initial_correct & ~final_correct).float().mean())
+                row["negative_second_pass"] = float(row["second_pass_gain"] < -1e-8)
+            if regional_predictions is not None:
+                row["predicted_region_repair"] = regional_predictions[selected, :, 0].cpu().tolist()
+                row["predicted_region_harm"] = regional_predictions[selected, :, 1].cpu().tolist()
+                row["region_grid"] = self.cfg["correction_grid"]
+                row["gain_semantics"] = "correction coverage proxy; not predicted Dice or certified safety"
             if self.cfg["retrieval_diagnostics"]:
                 diagnostic_start = time.perf_counter()
                 single_utility = [
@@ -282,6 +363,19 @@ class Pipeline:
                 Image.fromarray((prediction[0].cpu().numpy() > 0.5).astype("uint8") * 255).save(
                     result_dir / f"{prefix}_mask.png"
                 )
+                if regional_predictions is not None:
+                    from .visualization import save_correction_explanation
+
+                    save_correction_explanation(
+                        result_dir / f"{prefix}_explanation.png",
+                        data,
+                        pred0,
+                        uncertainty,
+                        prediction,
+                        supports[0],
+                        regional_predictions[selected],
+                        self.cfg["correction_grid"],
+                    )
                 np.savez_compressed(
                     result_dir / f"{prefix}_maps.npz",
                     probability=prediction.cpu().numpy(),
@@ -289,7 +383,9 @@ class Pipeline:
                     initial=pred0.cpu().numpy(),
                 )
         write_json(
-            dict(signature=self.signature, manifest_hash=self.manifest_hash, rows=rows),
+            dict(
+                signature=self.signature_for(ranker_kind(method)), manifest_hash=self.manifest_hash, rows=rows
+            ),
             result_dir / "per_case.json",
         )
         summary = summarize(rows)
@@ -365,6 +461,9 @@ def summarize(rows):
         "peak_gpu_mb",
         "second_pass_gain",
         "utility_at_k",
+        "repair_fraction",
+        "harm_fraction",
+        "negative_second_pass",
     ):
         values = [r[key] for r in rows if r.get(key) is not None]
         if values:

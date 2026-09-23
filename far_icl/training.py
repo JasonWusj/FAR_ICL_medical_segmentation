@@ -11,17 +11,57 @@ from .config import atomic_save, digest, read_tensor, seed_all, write_json
 from .retrieval import UtilityRanker, ranking_loss
 
 
+def _groups(path, pipeline, kind):
+    sample = read_tensor(path)
+    if kind != "correction":
+        return sample["groups"]
+    from .correction import correction_inputs
+
+    lookup = {entry["case"]["case_id"]: entry["features"] for entry in pipeline.bank.entries}
+    candidates = [lookup[case_id] for case_id in sample["candidate_ids"]]
+    inputs = correction_inputs(
+        sample["query"], candidates, sample["regional_state"], pipeline.cfg["feature_mode"]
+    )
+    if inputs.shape[:2] != sample["targets"].shape[:2]:
+        raise ValueError(f"Correction feature/label mismatch: {path}")
+    return [{"x": inputs, "y": sample["targets"]}]
+
+
+def _loss_and_scores(model, x, y, cfg, kind):
+    outputs = model(x)
+    if kind == "correction":
+        from .correction import correction_loss
+
+        loss = correction_loss(
+            outputs, y, cfg["loss"], cfg["regression_weight"], cfg["correction_harm_weight"]
+        )
+        return (
+            loss,
+            (outputs[..., 0] - cfg["correction_harm_weight"] * outputs[..., 1]).mean(1),
+            (y[..., 0] - cfg["correction_harm_weight"] * y[..., 1]).mean(1),
+        )
+    return ranking_loss(outputs, y, cfg["loss"], cfg["regression_weight"]), outputs, y
+
+
 def checkpoint_path(pipeline, kind):
-    train_id = digest({k: pipeline.cfg[k] for k in ("loss", "lr", "hidden_dim", "regression_weight")})[:12]
+    keys = ("loss", "lr", "hidden_dim", "regression_weight")
+    if kind == "correction":
+        keys += ("correction_harm_weight",)
+    train_id = digest({k: pipeline.cfg[k] for k in keys})[:12]
     return (
-        Path(pipeline.cfg["output"]) / "checkpoints" / pipeline.signature[:20] / kind / train_id / "best.pt"
+        Path(pipeline.cfg["output"])
+        / "checkpoints"
+        / pipeline.signature_for(kind)[:20]
+        / kind
+        / train_id
+        / "best.pt"
     )
 
 
 def train(pipeline, kind, resume=False):
     cfg, device = pipeline.cfg, pipeline.device
     seed_all(cfg["seed"], cfg["deterministic"])
-    paths = {split: sorted((pipeline.artifacts / kind / split).glob("*.pt")) for split in ("train", "val")}
+    paths = {split: sorted((pipeline.artifact_dir(kind) / split).glob("*.pt")) for split in ("train", "val")}
     if not all(paths.values()):
         raise ValueError("Generate both train and val supervision before training")
     patients = {}
@@ -32,7 +72,7 @@ def train(pipeline, kind, resume=False):
         for path in files:
             sample = read_tensor(path)
             if (
-                sample["signature"] != pipeline.signature
+                sample["signature"] != pipeline.signature_for(kind)
                 or sample["split"] != split
                 or sample["kind"] != kind
             ):
@@ -43,17 +83,25 @@ def train(pipeline, kind, resume=False):
             raise ValueError(f"Incomplete {split} supervision; rerun generate")
     if patients["train"] & patients["val"]:
         raise ValueError("Patient leakage in ranker supervision")
-    example = read_tensor(paths["train"][0])["groups"][0]["x"]
-    model = UtilityRanker(example.shape[1], cfg["hidden_dim"]).to(device)
+    example = _groups(paths["train"][0], pipeline, kind)[0]["x"]
+    if kind == "correction":
+        from .correction import CorrectionRanker
+
+        model = CorrectionRanker(example.shape[-1], cfg["hidden_dim"]).to(device)
+    else:
+        model = UtilityRanker(example.shape[-1], cfg["hidden_dim"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"])
     best_path = checkpoint_path(pipeline, kind)
     last_path = best_path.with_name("last.pt")
     first_epoch, best_loss, stale, history = 0, float("inf"), 0, []
     if resume and last_path.exists():
         state = read_tensor(last_path)
-        if state["signature"] != pipeline.signature or state["kind"] != kind:
+        if state["signature"] != pipeline.signature_for(kind) or state["kind"] != kind:
             raise ValueError("Resume provenance mismatch")
-        for key in ("hidden_dim", "lr", "loss", "regression_weight"):
+        keys = ("hidden_dim", "lr", "loss", "regression_weight")
+        if kind == "correction":
+            keys += ("correction_harm_weight",)
+        for key in keys:
             if state["config"][key] != cfg[key]:
                 raise ValueError(f"Resume config mismatch: {key}")
         model.load_state_dict(state["model"])
@@ -70,13 +118,14 @@ def train(pipeline, kind, resume=False):
         model.train()
         losses = []
         for path in tqdm(order, desc=f"Train {kind} {epoch + 1}/{cfg['epochs']}"):
-            groups = read_tensor(path)["groups"]
+            groups = _groups(path, pipeline, kind)
             # One update per query: long marginal trajectories do not overweight a patient slice.
             optimizer.zero_grad(set_to_none=True)
             query_loss = 0.0
             for group in groups:
                 x, y = group["x"].to(device), group["y"].to(device)
-                loss = ranking_loss(model(x), y, cfg["loss"], cfg["regression_weight"]) / len(groups)
+                loss, _, _ = _loss_and_scores(model, x, y, cfg, kind)
+                loss = loss / len(groups)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"Nonfinite loss: {path}")
                 loss.backward()
@@ -89,11 +138,11 @@ def train(pipeline, kind, resume=False):
         with torch.no_grad():
             for path in paths["val"]:
                 group_losses, group_regrets = [], []
-                for group in read_tensor(path)["groups"]:
+                for group in _groups(path, pipeline, kind):
                     x, y = group["x"].to(device), group["y"].to(device)
-                    scores = model(x)
-                    group_losses.append(float(ranking_loss(scores, y, cfg["loss"], cfg["regression_weight"])))
-                    group_regrets.append(float(y.max() - y[scores.argmax()]))
+                    loss, scores, utilities = _loss_and_scores(model, x, y, cfg, kind)
+                    group_losses.append(float(loss))
+                    group_regrets.append(float(utilities.max() - utilities[scores.argmax()]))
                 validation.append(float(np.mean(group_losses)))
                 regrets.append(float(np.mean(group_regrets)))
         val = float(np.mean(validation))
@@ -113,10 +162,10 @@ def train(pipeline, kind, resume=False):
             model=model.state_dict(),
             optimizer=optimizer.state_dict(),
             epoch=epoch,
-            input_dim=example.shape[1],
+            input_dim=example.shape[-1],
             hidden_dim=cfg["hidden_dim"],
             kind=kind,
-            signature=pipeline.signature,
+            signature=pipeline.signature_for(kind),
             best_loss=best_loss,
             stale=stale,
             history=history,
