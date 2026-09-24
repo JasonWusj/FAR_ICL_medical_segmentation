@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/../../common.sh"
 OUT="$OUT_BASE/supervised/nnunet"
-NNUNET_ENV="${NNUNET_ENV:-$REPO/.venv}"
+NNUNET_ENV="${NNUNET_ENV:-$("$PYTHON" -c 'import sys; print(sys.prefix)')}"
 if [[ ! -x "$NNUNET_ENV/bin/nnUNetv2_train" ]]; then
   "$NNUNET_ENV/bin/python" -m pip install 'nnunetv2==2.8.1'
 fi
