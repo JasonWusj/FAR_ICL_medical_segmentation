@@ -27,6 +27,7 @@ IRIS_PRED_DIR=/path/to/iris_128px_test_pngs bash experiments/published_icl/iris/
 ```
 
 It accepts one `case_id.png` binary mask per test image at 128×128 pixels. We have not found an author-released ISIC-ready Iris implementation and weights, so that folder scores **external predictions only** and does not claim an Iris reproduction. The [Iris paper](https://openaccess.thecvf.com/content/CVPR2025/papers/Gao_Show_and_Segment_Universal_Medical_Image_Segmentation_via_In-Context_Learning_CVPR_2025_paper.pdf) is for a 3D method; a 2D ISIC adapter would need separate validation.
+If the external run's support count is known, set `IRIS_SUPPORT_K`; otherwise it is recorded as unknown.
 
 ## Groups and provenance
 

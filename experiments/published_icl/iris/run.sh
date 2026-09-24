@@ -9,4 +9,4 @@ OUT="$OUT_BASE/published_icl/iris_external"
 mkdir -p "$OUT"
 "$PYTHON" -m experiments.score_masks --config configs/isic.yaml \
   "${common_args[@]}" --set "output=$OUT" --pred-dir "$IRIS_PRED_DIR" \
-  --method iris_external --split test
+  --method iris_external --split test --support-k "${IRIS_SUPPORT_K:--1}"

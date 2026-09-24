@@ -11,7 +11,9 @@ from far_icl.pipeline import summarize
 
 
 def save_results(cfg, manifest_hash, method, split, rows, extra=None):
-    target = Path(cfg["output"]) / "results" / f"{method}_k{cfg['k']}_{split}_seed{cfg['seed']}"
+    support_k = rows[0].get("k")
+    k_label = "unknown" if support_k is None else str(support_k)
+    target = Path(cfg["output"]) / "results" / f"{method}_k{k_label}_{split}_seed{cfg['seed']}"
     target.mkdir(parents=True, exist_ok=True)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     write_json(cfg, target / "config.json")
