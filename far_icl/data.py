@@ -104,21 +104,26 @@ def load_case(case, cfg, with_mask=True):
     spacing = (case.spacing_y * h / 128, case.spacing_x * w / 128)
     result = dict(rgb=rgb, image=gray, spacing=spacing, original_size=(h, w))
     if with_mask:
-        mask = read_array(case.mask_path)
-        if mask.ndim == 3 and mask.shape[-1] == 1:
-            mask = mask[..., 0]
-        if mask.ndim != 2 or mask.shape != (h, w):
-            raise ValueError(f"Mask must be a registered 2D label image: {case.mask_path}")
-        if not np.isfinite(mask).all():
-            raise ValueError("Nonfinite mask")
-        values = cfg["mask_values"]
-        if values is None:
-            if not set(np.unique(mask)).issubset({0, 1, 255}):
-                raise ValueError("Multiclass masks require explicit mask_values")
-            mask = mask > 0
-        else:
-            mask = np.isin(mask, values)
-        result["mask"] = F.interpolate(
-            torch.from_numpy(mask.astype(np.float32))[None, None], (128, 128), mode="nearest"
-        )[0]
+        result["mask"] = load_mask(case, cfg, (h, w))
     return result
+
+
+def load_mask(case, cfg, original_size=None):
+    """Read a registered mask without decoding the query image a second time."""
+    mask = read_array(case.mask_path)
+    if mask.ndim == 3 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    if mask.ndim != 2 or (original_size is not None and mask.shape != tuple(original_size)):
+        raise ValueError(f"Mask must be a registered 2D label image: {case.mask_path}")
+    if not np.isfinite(mask).all():
+        raise ValueError("Nonfinite mask")
+    values = cfg["mask_values"]
+    if values is None:
+        if not set(np.unique(mask)).issubset({0, 1, 255}):
+            raise ValueError("Multiclass masks require explicit mask_values")
+        mask = mask > 0
+    else:
+        mask = np.isin(mask, values)
+    return F.interpolate(
+        torch.from_numpy(mask.astype(np.float32))[None, None], (128, 128), mode="nearest"
+    )[0]
