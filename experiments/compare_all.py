@@ -14,10 +14,16 @@ RUNS = {
     "far_icl_repair": "same_backbone/far_icl_repair",
     "dual_similarity_adapted": "same_backbone/dual_similarity_adapted",
     "tyche": "published_icl/tyche",
+    "tyche_repair": "published_icl/tyche_repair",
     "ires_s3_adapted": "published_icl/ires_s3_adapted",
     "iris_external": "published_icl/iris_external",
     "unet": "supervised/unet",
     "nnunet": "supervised/nnunet",
+}
+
+SAME_BACKBONE_PAIRS = {
+    "far_icl_repair": "universeg_knn",
+    "tyche_repair": "tyche",
 }
 
 
@@ -37,6 +43,7 @@ def collect(root, seed, samples):
     baseline = data["universeg_knn"][1]
     rows = []
     paired = {}
+    paired_within_backbone = {}
     for label, (path, result) in data.items():
         if result["manifest_hash"] != baseline["manifest_hash"]:
             raise ValueError(f"Manifest mismatch: {label}")
@@ -63,16 +70,30 @@ def collect(root, seed, samples):
             ]
             row["ci95_low"], row["ci95_high"] = comparison["ci95"]
             paired[label] = comparison
+        reference_label = SAME_BACKBONE_PAIRS.get(label)
+        if reference_label in data:
+            within = paired_identity_bootstrap(
+                data[reference_label][1]["rows"], cases, result["identity_scope"], seed, samples
+            )
+            row["same_backbone_reference"] = reference_label
+            row["delta_dice_vs_same_backbone_knn"] = within[
+                "image_macro_delta" if result["identity_scope"] == "image" else "patient_macro_delta"
+            ]
+            row["same_backbone_ci95_low"], row["same_backbone_ci95_high"] = within["ci95"]
+            paired_within_backbone[label] = within
         rows.append(row)
     target = root / "comparison"
     target.mkdir(parents=True, exist_ok=True)
     with (target / "test_table.csv").open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=["method", "n", "dice", "iou",
                                                  "isic_thresholded_jaccard_0_65",
-                                                 "delta_dice_vs_knn", "ci95_low", "ci95_high", "source"])
+                                                 "delta_dice_vs_knn", "ci95_low", "ci95_high",
+                                                 "same_backbone_reference", "delta_dice_vs_same_backbone_knn",
+                                                 "same_backbone_ci95_low", "same_backbone_ci95_high", "source"])
         writer.writeheader()
         writer.writerows(rows)
-    write_json({"paired_vs_knn": paired, "missing": missing,
+    write_json({"paired_vs_knn": paired, "paired_within_backbone": paired_within_backbone,
+                "missing": missing,
                 "note": "Exploratory image-level comparison; test split has already been inspected."},
                target / "paired.json")
     print(target / "test_table.csv")
