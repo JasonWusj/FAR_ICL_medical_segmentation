@@ -8,6 +8,9 @@ export TORCH_HOME="${TORCH_HOME:-/home/featurize/work/.cache/torch}"
 PYTHON="${PYTHON:-$REPO/.venv/bin/python}"
 MANIFEST="${MANIFEST:-/home/featurize/work/isic2018_full_with_test.csv}"
 OUT_BASE="${OUT_BASE:-/home/featurize/work/far_icl_paper_runs}"
+# The first KNN run already writes here. Other retrieval experiments reuse the
+# content-addressed train-only bank, while retaining separate result folders.
+export FARICL_BANK_CACHE_ROOT="${FARICL_BANK_CACHE_ROOT:-$OUT_BASE/same_backbone/universeg_knn/cache}"
 IDENTITY_SCOPE="${IDENTITY_SCOPE:-image}"
 K="${K:-2}"
 SEED="${SEED:-42}"

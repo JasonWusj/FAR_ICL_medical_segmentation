@@ -1,5 +1,6 @@
 """Train-only support bank with content-addressed feature caches."""
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -30,7 +31,8 @@ class CaseBank:
         self.signature = digest(
             dict(manifest=manifest_hash, config=relevant, encoder=h.hexdigest(), schema=1)
         )
-        self.root = Path(cfg["output"]) / "cache" / self.signature[:20]
+        cache_parent = os.environ.get("FARICL_BANK_CACHE_ROOT")
+        self.root = (Path(cache_parent) if cache_parent else Path(cfg["output"]) / "cache") / self.signature[:20]
         self.entries = []
         for case in tqdm(cases, desc="Case bank"):
             if case.split != "train" or (cfg["bank_domains"] and case.domain not in cfg["bank_domains"]):
