@@ -1,7 +1,10 @@
 """Inference and offline supervision share identical label-free retrieval features."""
 
 import hashlib
+import os
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +14,7 @@ from tqdm import tqdm
 
 from .bank import CaseBank
 from .config import atomic_save, digest, file_digest, read_tensor, seed_all, write_json
-from .data import load_case, manifest_signature, read_manifest
+from .data import load_case, load_mask, manifest_signature, read_manifest
 from .features import ImageEncoder, describe, pair_features, set_features
 from .metrics import dice, diversity, segmentation_metrics
 from .retrieval import UtilityRanker, select
@@ -96,9 +99,9 @@ class Pipeline:
         return np.random.default_rng(seed)
 
     @torch.no_grad()
-    def context(self, case, random_candidates=False, need_failure=True, with_regions=False):
+    def context(self, case, random_candidates=False, need_failure=True, with_regions=False, data=None):
         rng = self.rng_for(case)
-        data = load_case(case, self.cfg, with_mask=False)
+        data = data if data is not None else load_case(case, self.cfg, with_mask=False)
         z, fmap = self.encoder(data["rgb"][None].to(self.device))
         candidates = self.bank.candidates(
             case, z[0], self.cfg["candidate_n"], rng if random_candidates else None
@@ -265,8 +268,27 @@ class Pipeline:
             ),
             result_dir / "provenance.json",
         )
+        cases = self.queries(split)
+        io_workers = int(os.environ.get("FARICL_EVAL_IO_WORKERS", "4"))
+        if io_workers < 1:
+            raise ValueError("FARICL_EVAL_IO_WORKERS must be positive")
+
+        def prefetched_queries():
+            # Only image data is prefetched. Query masks remain unread until
+            # support selection and prediction have completed.
+            with ThreadPoolExecutor(max_workers=io_workers) as pool:
+                ahead = min(io_workers * 2, len(cases))
+                pending = deque(pool.submit(load_case, case, self.cfg, False) for case in cases[:ahead])
+                for index, case in enumerate(cases):
+                    future = pending.popleft()
+                    if index + ahead < len(cases):
+                        pending.append(pool.submit(load_case, cases[index + ahead], self.cfg, False))
+                    wait_start = time.perf_counter()
+                    data = future.result()
+                    yield case, data, time.perf_counter() - wait_start
+
         rows = []
-        for case in tqdm(self.queries(split), desc=name):
+        for case, query_data, query_io_wait in tqdm(prefetched_queries(), total=len(cases), desc=name):
             self.segmenter.reset_stats()
             if self.device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(self.device)
@@ -280,6 +302,7 @@ class Pipeline:
                 random_candidates=method == "random",
                 need_failure=need_failure,
                 with_regions=method in CORRECTION_METHODS,
+                data=query_data,
             )
             gains = []
             regional_predictions = None
@@ -314,7 +337,8 @@ class Pipeline:
             self.segmenter.sync()
             elapsed = time.perf_counter() - start
             # Query ground truth is first read AFTER selection and prediction.
-            truth = load_case(case, self.cfg)["mask"]
+            scoring_start = time.perf_counter()
+            truth = load_mask(case, self.cfg, data["original_size"])
             row = dict(
                 case_id=case.case_id,
                 patient_id=case.patient_id,
@@ -327,6 +351,7 @@ class Pipeline:
                 support_patient_ids=[s["case"]["patient_id"] for s in supports],
                 predicted_gains=gains,
                 uncertainty=float(uncertainty.mean()),
+                query_io_wait_seconds=query_io_wait,
                 elapsed_seconds=elapsed,
                 segmentation_seconds=self.segmenter.seconds,
                 retrieval_seconds=max(0, elapsed - self.segmenter.seconds),
@@ -351,6 +376,7 @@ class Pipeline:
                 row["predicted_region_harm"] = regional_predictions[selected, :, 1].cpu().tolist()
                 row["region_grid"] = self.cfg["correction_grid"]
                 row["gain_semantics"] = "correction coverage proxy; not predicted Dice or certified safety"
+            row["scoring_seconds"] = time.perf_counter() - scoring_start
             if self.cfg["retrieval_diagnostics"]:
                 diagnostic_start = time.perf_counter()
                 single_utility = [
@@ -359,7 +385,6 @@ class Pipeline:
                 row["utility_at_k"] = float(np.mean(single_utility))
                 row["selected_single_utilities"] = single_utility
                 row["diagnostic_seconds"] = time.perf_counter() - diagnostic_start
-            rows.append(row)
             if self.cfg["save_predictions"]:
                 prefix = digest(case.case_id)[:20]
                 Image.fromarray((prediction[0].cpu().numpy() > 0.5).astype("uint8") * 255).save(
@@ -384,6 +409,8 @@ class Pipeline:
                     uncertainty=uncertainty.cpu().numpy(),
                     initial=pred0.cpu().numpy(),
                 )
+            row["total_case_seconds"] = query_io_wait + time.perf_counter() - start
+            rows.append(row)
         write_json(
             dict(
                 signature=self.signature_for(ranker_kind(method)),
@@ -461,6 +488,9 @@ def summarize(rows, identity_scope="patient"):
         "k",
         "diversity",
         "elapsed_seconds",
+        "query_io_wait_seconds",
+        "scoring_seconds",
+        "total_case_seconds",
         "segmentation_seconds",
         "retrieval_seconds",
         "segmentation_calls",
