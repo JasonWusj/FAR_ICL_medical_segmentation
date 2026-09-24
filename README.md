@@ -295,6 +295,8 @@ UniverSeg 的预训练数据重叠必须按官方 MegaMedical 列表审计，未
 
 ## 上游来源
 
+三组论文对比实验（同骨干检索、已发表 ICL、全监督）及各方法独立启动脚本见 [experiments/README.md](experiments/README.md)。其中双相似度和 IRES 标为适配实现，Iris 仅提供外部预测评分入口；不要将这些结果写成作者官方复现。
+
 - [UniverSeg 官方代码](https://github.com/JJGO/UniverSeg)：ICCV 2023，模型输出 logits，在 wrapper 中 sigmoid。
 - [Tyche 官方代码](https://github.com/mariannerakic/Tyche)：CVPR 2024，适配 Tyche-TS 的 `tychets`。
 - [DINOv2 官方代码](https://github.com/facebookresearch/dinov2)：ViT-S/14 patch/global features。
