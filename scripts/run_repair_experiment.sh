@@ -91,7 +91,8 @@ if [[ -n "$KNN_JSON" && ! -s "$KNN_JSON" ]]; then
 fi
 
 if [[ -z "$KNN_JSON" ]]; then
-  KNN_JSON="$("$PYTHON" - "$OUT" "$MANIFEST" "$CONFIG" "$K" "$SEED" "$CANDIDATE_N" <<'PY'
+  KNN_JSON="$("$PYTHON" - "$OUT" "$MANIFEST" "$CONFIG" "$K" "$SEED" \
+    "$CANDIDATE_N" "$INITIAL_K" "$UNCERTAINTY_SAMPLES" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -99,17 +100,19 @@ from pathlib import Path
 from far_icl.config import load_config
 
 root, manifest, config_path = Path(sys.argv[1]), str(Path(sys.argv[2]).resolve()), sys.argv[3]
-k, seed, candidate_n = map(int, sys.argv[4:7])
+k, seed, candidate_n, initial_k, uncertainty_samples = map(int, sys.argv[4:9])
 expected = load_config(
     config_path,
     [
         f"manifest={manifest}", "identity_scope=image", f"k={k}",
-        f"seed={seed}", f"candidate_n={candidate_n}",
+        f"seed={seed}", f"candidate_n={candidate_n}", f"initial_k={initial_k}",
+        "max_k=2", f"uncertainty_samples={uncertainty_samples}",
     ],
 )
 keys = (
-    "manifest", "identity_scope", "seed", "k", "candidate_n", "encoder",
-    "encoder_repo", "encoder_weights", "segmenter", "segmenter_weights",
+    "manifest", "identity_scope", "seed", "k", "candidate_n", "initial_k",
+    "max_k", "uncertainty_samples", "encoder", "encoder_repo", "encoder_weights",
+    "segmenter", "segmenter_weights",
     "image_size", "mask_values", "bank_domains", "query_domains",
 )
 candidates = []
