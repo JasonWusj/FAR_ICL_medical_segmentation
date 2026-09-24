@@ -130,6 +130,24 @@ python3 scripts/prepare_isic2018_exploratory.py \
 清单内容参与缓存和 checkpoint 指纹，因此不能把测试行临时追加到已训练的旧清单后
 直接复用旧 checkpoint。测试集只用于最终评估；不在测试集上调阈值或选择方法。
 
+#### 一键训练并比较 Repair
+
+已有 ISIC Task 1 全量清单时，可运行下面的脚本。它按 train/val/test 固定协议训练或恢复
+Repair，验证集选择 checkpoint，在相同测试病例上比较 KNN 与 Repair，并保存配对 bootstrap 区间：
+
+```bash
+git pull --ff-only
+MANIFEST=/home/featurize/work/isic2018_full_with_test.csv \
+OUT=/home/featurize/work/far_icl_runs/isic2018_full_repair \
+TORCH_HOME=/home/featurize/work/.cache/torch \
+bash scripts/run_repair_experiment.sh
+```
+
+默认 `K=2`、`candidate_n=12`、`lr=0.00003`、最多 100 epoch、patience 20；可用同名环境变量覆盖。
+脚本会复用兼容的已有 KNN 测试结果和纠错监督缓存，默认不保存逐病例预测图，以减少重复推理和磁盘写入。
+输出包括 `paired_test_comparison.json`、`results.csv`、`dice_comparison.png`、运行日志和实验协议说明。
+该清单没有真实 patient_id，所以置信区间按图像配对 bootstrap 计算，只能支持图像级探索结论，不能证明患者级独立性或每个病例都获益。
+
 可先在 Linux 上用指定病例执行一次接口 smoke test（本次未执行）：
 
 ```bash
