@@ -30,6 +30,6 @@ run_eval() {
   local method="$1" config="$2" output="$3" split="$4" tag="$5"
   mkdir -p "$output/logs"
   "$PYTHON" -m far_icl.cli evaluate --method "$method" --split "$split" \
-    --tag "$tag" --config "$config" "${common_args[@]}" --set "output=$output" \
+    --tag "$tag" --config "$config" "${common_args[@]}" --set "output=$output" "${@:6}" \
     2>&1 | tee "$output/logs/${tag}.log"
 }
