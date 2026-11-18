@@ -1,5 +1,32 @@
 # ISIC 2018 exploratory comparison suite
 
+## 单步替换实验
+
+在仓库根目录使用已配置好的 Featurize 环境。可沿用现有训练/验证 manifest 和外部数据路径。默认 K=2、N=12、4×4 区域、关闭额外不确定性采样。
+
+```bash
+export MANIFEST=/home/featurize/work/isic2018_full_with_test.csv
+export OUT_BASE=/home/featurize/work/far_icl_swap_runs
+export PYTHON="$PWD/.venv/bin/python"
+RUN=experiments/same_backbone/far_icl_swap/run.sh
+bash "$RUN" oracle          # 仅 val，先看 KNN、一步可达上限及全部候选对上限
+bash "$RUN" suite           # KNN、独立纠错覆盖、仅 ΔDice、区域转移＋ΔDice，训练和 val 配对比较
+```
+
+如果使用已装好 CUDA 版 torch 的当前环境，设 `export PYTHON="$(command -v python)"`。单独训练或仅评估可使用以下命令。
+
+```bash
+VARIANT=full bash "$RUN" train
+VARIANT=dice bash "$RUN" train
+VARIANT=full SPLIT=val bash "$RUN" eval
+```
+
+四组共享召回池、冻结权重和预处理。两个替换模型复用相同的逐动作监督，各自训练 checkpoint。`dice` 仅关闭区域软标签损失。验证阶段在 0、0.005、0.01、0.02 中选择使验证平均实际收益最大的停止阈值，并将最佳 epoch 的阈值写入 checkpoint。显式 `SWAP_THRESHOLD` 可覆盖推理阈值，并将该次评估保存到带阈值标记的结果目录。协议和阈值冻结后可用 `SPLIT=test` 单独评估。此 ISIC 测试集属于既往已查看的探索性数据。
+
+该入口的日志与指标位于 `$OUT_BASE/same_backbone/far_icl_swap/`。`results/swap_oracle_*/swap_oracle.json` 含每张查询的全部候选对分数与单步上限，GPU 分割调用次数取决于缓存命中。在线选择只使用评分网络，拒绝动作时复用初始预测。`results/*/per_case.json` 记录接受决策、支持病例、分割开销和实际 ΔDice；存在匹配的 val 监督时还记录单步最优收益与实得收益之差。`logs/full_vs_*.json` 给出四组中三个配对比较的 bootstrap 区间。
+
+## Existing comparison suite
+
 All launchers read the same manifest (2,594 train / 100 validation / 1,000 test), use image-level identity, and write to **separate folders** under `OUT_BASE`. The source ZIP files and extracted images can remain outside this repository. The common primary metrics are mean Dice, IoU, and ISIC-style thresholded Jaccard (`IoU < 0.65` is scored as zero). This is an exploratory comparison: no patient IDs are available, and the test split has already been examined in earlier runs. It cannot establish patient-independent generalization or a new blind ISIC challenge score. Check the pretrained UniverSeg/Tyche training data for ISIC overlap before claiming an unseen-dataset result.
 
 On Featurize, after `git pull --ff-only`, run one folder at a time. If the new server already has a CUDA-enabled PyTorch/torchvision environment, use `PYTHON="$(command -v python)" bash scripts/setup_existing_torch.sh` and `export PYTHON="$(command -v python)"` instead of `setup_linux.sh`; this keeps the existing PyTorch installation. The selected Python must report `torch.cuda.is_available() == True`.

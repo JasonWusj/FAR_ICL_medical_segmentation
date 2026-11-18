@@ -1,9 +1,9 @@
 # FAR-ICL: Failure-Aware Retrieval for Medical In-Context Segmentation
 
-围绕 **Similar → Useful → Corrective → Complementary** 的完整研究实现。
-冻结分割 backbone 与图像 encoder，训练 utility / marginal-utility 检索器。
+当前主方法在固定支持数下学习一次病例替换。冻结 ResNet50 和 UniverSeg，由评分器预测区域转移和替换后的 ΔDice，保留原集合也是可选动作。
+运行方法见[单步替换实验命令](experiments/README.md#单步替换实验)。
 
-**交付状态：代码实现与静态检查完成；未在本地下载模型权重、运行训练、分割推理或医学数据实验。没有预设的实验成绩。**
+**验证状态**　本地已用合成数据检查固定 K 替换的训练、推理和穷举流程。该方法在 ISIC 上的分割效果仍待服务器实验验证。
 运行前需要自行准备有权限使用的数据、患者元信息和 Linux 环境。此项目不能保证未实际执行的 GPU 兼容性或算法提升。
 
 ## 已实现的方法
@@ -12,6 +12,7 @@
 |---|---|---|
 | Random context | `bash scripts/run_random.sh` | 否 |
 | Appearance KNN | `bash scripts/run_knn.sh` | 否 |
+| 固定 K 的区域纠错与条件替换 | `bash experiments/same_backbone/far_icl_swap/run.sh train` | 是，同一入口的 `eval` 仅评估 |
 | Appearance + Shape | `bash scripts/run_shape.sh` | 否 |
 | Failure-aware second pass | `bash scripts/run_failure.sh` | 否，组合相似度 |
 | Utility Top-K | `bash scripts/run_utility.sh` | 是，MLP |
@@ -26,7 +27,7 @@
 | Oracle gap | `bash scripts/oracle.sh` | 否，仅使用 GT 的诊断 |
 | Tyche-TS backbone / uncertainty | `bash scripts/run_tyche.sh` | 默认 utility + MMR |
 
-每种方法都有独立 `scripts/eval_<method>.sh`，仅验证，不生成监督、不训练。
+原有检索方法使用独立 `scripts/eval_<method>.sh` 做验证。条件替换的 `oracle` 入口在验证集完全枚举候选对，`suite` 运行四组对照并生成配对统计。
 `run_*` 对可学习方法依次生成 train/val 监督、训练、选择验证集最佳 checkpoint、验证；
 无训练参数的方法直接执行评估，避免把基线推理称为训练。
 

@@ -5,6 +5,7 @@ import os
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -21,10 +22,12 @@ from .retrieval import UtilityRanker, select
 from .segmentation import Segmenter, estimate_uncertainty
 
 CORRECTION_METHODS = {"repair", "repair_cover", "repair_adaptive"}
-LEARNED = {"utility", "mmr", "set", "adaptive", "adaptive_learned"} | CORRECTION_METHODS
+LEARNED = {"utility", "mmr", "set", "adaptive", "adaptive_learned", "swap"} | CORRECTION_METHODS
 
 
 def ranker_kind(method):
+    if method == "swap":
+        return "swap"
     if method in CORRECTION_METHODS:
         return "correction"
     return "marginal" if method in {"set", "adaptive_learned"} else "utility"
@@ -78,6 +81,10 @@ class Pipeline:
         self.artifacts = Path(cfg["output"]) / "supervision" / self.signature[:20]
 
     def signature_for(self, kind):
+        if kind == "swap":
+            return digest(
+                dict(base=self.signature, k=self.cfg["k"], grid=self.cfg["correction_grid"], swap_schema=1)
+            )
         if kind == "correction":
             return digest(dict(base=self.signature, grid=self.cfg["correction_grid"], correction_schema=1))
         return self.signature
@@ -123,10 +130,53 @@ class Pipeline:
             data["regional_state"] = regional_state(fmap[0], pred, uncertainty, self.cfg["correction_grid"])
         return data, query, candidates, features, rng, pred, uncertainty
 
+    def _check_swap_protocol(self):
+        if self.cfg["segmenter"] != "universeg":
+            raise ValueError("swap requires frozen deterministic UniverSeg")
+        if self.cfg["k"] != self.cfg["initial_k"] or self.cfg["k"] >= self.cfg["candidate_n"]:
+            raise ValueError("swap requires initial_k == k < candidate_n")
+
+    def _swap_actions(self, case, candidates):
+        from .swap import swap_actions
+
+        if len(candidates) <= self.cfg["k"]:
+            raise ValueError(f"{case.case_id}: swap needs at least k+1 eligible training supports")
+        selected = list(range(self.cfg["k"]))
+        return selected, swap_actions(selected, len(candidates))
+
+    def _cached_swap_masks(self, case, image, candidates, sets):
+        """Share packed offline masks between supervision and the validation oracle."""
+        if not sets:
+            return {}
+        by_ids = {tuple(sorted(candidates[i]["case"]["case_id"] for i in group)): group for group in sets}
+        # One immutable shard per query and unordered family of support sets.
+        # Both commands request all one-swap neighbors as the same shard.
+        shard = (
+            Path(self.cfg["output"])
+            / "swap_masks"
+            / self.signature_for("swap")[:20]
+            / digest(case.case_id)
+            / f"{digest(sorted(by_ids))}.pt"
+        )
+        packed = read_tensor(shard) if shard.exists() else {}
+        if not packed:
+            for ids, group in by_ids.items():
+                prediction = self.segmenter(image, [candidates[i] for i in group])
+                packed[ids] = torch.from_numpy(np.packbits((prediction > 0.5).cpu().numpy()))
+            atomic_save(packed, shard)
+        return {
+            group: torch.from_numpy(
+                np.unpackbits(packed[ids].numpy(), count=image.numel()).reshape(image.shape)
+            )
+            for ids, group in by_ids.items()
+        }
+
     @torch.no_grad()
     def generate(self, kind, split, force=False):
         if split not in {"train", "val"}:
             raise ValueError("Test labels must never generate training/validation supervision")
+        if kind == "swap":
+            self._check_swap_protocol()
         target = self.artifact_dir(kind) / split
         target.mkdir(parents=True, exist_ok=True)
         for case in tqdm(self.queries(split), desc=f"Generate {kind}/{split}"):
@@ -135,10 +185,48 @@ class Pipeline:
                 continue
             data, query, candidates, features, rng, initial, _ = self.context(
                 case,
-                need_failure=kind == "correction" or self.cfg["feature_mode"] != "image",
-                with_regions=kind == "correction",
+                need_failure=kind in {"correction", "swap"} or self.cfg["feature_mode"] != "image",
+                with_regions=kind in {"correction", "swap"},
             )
-            truth = load_case(case, self.cfg)["mask"].to(self.device)
+            truth = load_mask(case, self.cfg, data["original_size"])
+            if kind == "swap":
+                from .swap import swapped_set, transition_targets
+
+                selected, actions = self._swap_actions(case, candidates)
+                sets = [swapped_set(selected, a) for a in actions]
+                masks = self._cached_swap_masks(case, data["image"], candidates, sets)
+                initial_cpu = initial.cpu()
+                baseline = dice(initial_cpu.numpy(), truth.numpy())
+                atomic_save(
+                    dict(
+                        query={key: value.cpu() for key, value in query.items()},
+                        regional_state=data["regional_state"].cpu(),
+                        candidate_ids=[entry["case"]["case_id"] for entry in candidates],
+                        selected=selected,
+                        actions=actions,
+                        transitions=torch.stack(
+                            [
+                                transition_targets(
+                                    initial_cpu, masks[group], truth, self.cfg["correction_grid"]
+                                )
+                                for group in sets
+                            ]
+                        ),
+                        deltas=torch.tensor(
+                            [dice(masks[group].numpy(), truth.numpy()) - baseline for group in sets],
+                            dtype=torch.float64,
+                        ),
+                        case_id=case.case_id,
+                        patient_id=case.patient_id,
+                        split=split,
+                        kind=kind,
+                        signature=self.signature_for(kind),
+                        storage="indexed-swap-v1",
+                    ),
+                    output,
+                )
+                continue
+            truth = truth.to(self.device)
             groups = []
             if kind == "correction":
                 from .correction import correction_targets
@@ -233,6 +321,19 @@ class Pipeline:
         expected = ranker_kind(method)
         if checkpoint["kind"] != expected or checkpoint["signature"] != self.signature_for(expected):
             raise ValueError("Checkpoint type/provenance mismatch; use matching config and bank")
+        if expected == "swap":
+            from .swap import SwapRanker
+
+            if checkpoint["config"]["swap_transition_weight"] != self.cfg["swap_transition_weight"]:
+                raise ValueError("swap_transition_weight differs from the checkpoint training configuration")
+            model = SwapRanker(checkpoint["input_dim"], checkpoint["hidden_dim"]).to(self.device)
+            model.load_state_dict(checkpoint["model"])
+            model.swap_threshold = (
+                checkpoint["swap_threshold"]
+                if self.cfg["swap_threshold"] is None
+                else self.cfg["swap_threshold"]
+            )
+            return model.eval()
         if expected == "correction":
             from .correction import CorrectionRanker
 
@@ -244,6 +345,8 @@ class Pipeline:
 
     @torch.no_grad()
     def evaluate(self, method, split, checkpoint=None, tag=None):
+        if method == "swap":
+            self._check_swap_protocol()
         ranker = self.load_ranker(checkpoint, method)
         name = tag or f"{method}_k{self.cfg['k']}_{split}_seed{self.cfg['seed']}_{digest(self.cfg)[:8]}"
         if Path(name).name != name:
@@ -294,19 +397,53 @@ class Pipeline:
                 torch.cuda.reset_peak_memory_stats(self.device)
             self.segmenter.sync()
             start = time.perf_counter()
-            need_failure = method in {"shape", "roles", "adaptive"} | CORRECTION_METHODS or (
+            need_failure = method in {"shape", "roles", "adaptive", "swap"} | CORRECTION_METHODS or (
                 method not in {"random", "knn"} and self.cfg["feature_mode"] != "image"
             )
             data, query, candidates, features, rng, pred0, uncertainty = self.context(
                 case,
                 random_candidates=method == "random",
                 need_failure=need_failure,
-                with_regions=method in CORRECTION_METHODS,
+                with_regions=method == "swap" or method in CORRECTION_METHODS,
                 data=query_data,
             )
             gains = []
             regional_predictions = None
-            if method in {"random", "knn"}:
+            swap_record = {}
+            if method == "swap":
+                from .swap import choose_swap, swap_inputs, swapped_set
+
+                selected, actions = self._swap_actions(case, candidates)
+                x = swap_inputs(
+                    query, features, data["regional_state"], selected, actions, self.cfg["feature_mode"]
+                )
+                logits, scores = ranker(x)
+                choice = choose_swap(scores, ranker.swap_threshold)
+                best = int(scores.argmax())
+                outgoing, incoming = actions[best]
+                candidate_ids = [entry["case"]["case_id"] for entry in candidates]
+                swap_record = dict(
+                    initial_support_ids=candidate_ids[: len(selected)],
+                    candidate_ids=candidate_ids,
+                    swap_actions_scored=len(actions),
+                    swap_accepted=choice is not None,
+                    swap_threshold=ranker.swap_threshold,
+                    proposed_out=candidate_ids[outgoing],
+                    proposed_in=candidate_ids[incoming],
+                    swap_out=candidate_ids[outgoing] if choice is not None else None,
+                    swap_in=candidate_ids[incoming] if choice is not None else None,
+                    best_predicted_delta_dice=float(scores[best]),
+                )
+                if self.cfg["swap_transition_weight"] > 0:
+                    swap_record.update(
+                        proposed_region_transitions=logits[best].softmax(-1).cpu().tolist(),
+                        transition_order=["FN_to_TP", "FP_to_TN", "TP_to_FN", "TN_to_FP", "unchanged"],
+                        region_grid=self.cfg["correction_grid"],
+                    )
+                if choice is not None:
+                    selected = swapped_set(selected, actions[choice])
+                    gains = [float(scores[choice])]
+            elif method in {"random", "knn"}:
                 selected = list(range(min(self.cfg["k"], len(candidates))))
             elif method in CORRECTION_METHODS:
                 from .correction import correction_inputs, select_corrections
@@ -333,7 +470,8 @@ class Pipeline:
             else:
                 selected, gains = select(query, features, self.cfg, method, ranker)
             supports = [candidates[j] for j in selected]
-            prediction = self.segmenter(data["image"], supports)
+            keep_initial = method == "swap" and not swap_record["swap_accepted"]
+            prediction = pred0 if keep_initial else self.segmenter(data["image"], supports)
             self.segmenter.sync()
             elapsed = time.perf_counter() - start
             # Query ground truth is first read AFTER selection and prediction.
@@ -349,6 +487,7 @@ class Pipeline:
                 k=len(selected),
                 support_ids=[s["case"]["case_id"] for s in supports],
                 support_patient_ids=[s["case"]["patient_id"] for s in supports],
+                **swap_record,
                 predicted_gains=gains,
                 uncertainty=float(uncertainty.mean()),
                 query_io_wait_seconds=query_io_wait,
@@ -364,13 +503,32 @@ class Pipeline:
                 **segmentation_metrics(prediction, truth, data["spacing"], self.cfg["surface_tolerance"]),
             )
             if need_failure:
-                row["initial_dice"] = dice(pred0.cpu(), truth)
+                row["initial_dice"] = dice(pred0.cpu().numpy(), truth.numpy())
                 row["second_pass_gain"] = row["dice"] - row["initial_dice"]
                 initial_correct = (pred0.cpu() > 0.5) == (truth > 0.5)
                 final_correct = (prediction.cpu() > 0.5) == (truth > 0.5)
                 row["repair_fraction"] = float((~initial_correct & final_correct).float().mean())
                 row["harm_fraction"] = float((initial_correct & ~final_correct).float().mean())
                 row["negative_second_pass"] = float(row["second_pass_gain"] < -1e-8)
+            if method == "swap" and split == "val":
+                label_path = self.artifact_dir("swap") / split / f"{digest(case.case_id)}.pt"
+                if label_path.exists():
+                    sample = read_tensor(label_path)
+                    if (
+                        sample["signature"] != self.signature_for("swap")
+                        or sample["case_id"] != case.case_id
+                        or sample["split"] != split
+                        or sample["candidate_ids"] != row["candidate_ids"]
+                        or [sample["candidate_ids"][i] for i in sample["selected"]]
+                        != row["initial_support_ids"]
+                    ):
+                        raise ValueError(f"Mismatched validation swap labels for {case.case_id}")
+                    row["one_swap_regret"] = max(0.0, float(sample["deltas"].max())) - row["second_pass_gain"]
+            if swap_record.get("swap_accepted"):
+                row["swap_negative_if_accepted"] = row["negative_second_pass"]
+                row["swap_gain_error_if_accepted"] = abs(
+                    row["best_predicted_delta_dice"] - row["second_pass_gain"]
+                )
             if regional_predictions is not None:
                 row["predicted_region_repair"] = regional_predictions[selected, :, 0].cpu().tolist()
                 row["predicted_region_harm"] = regional_predictions[selected, :, 1].cpu().tolist()
@@ -426,6 +584,87 @@ class Pipeline:
         return result_dir
 
     @torch.no_grad()
+    def swap_oracle(self, split="val"):
+        """Score all pairs in this retrieved pool and the subset reachable in one swap."""
+        if split != "val" or self.cfg["k"] != 2:
+            raise ValueError("Exhaustive pair oracle requires the validation split and k=2")
+        self._check_swap_protocol()
+        from .swap import swapped_set
+
+        rows = []
+        for case in tqdm(self.queries(split), desc="Validation pair oracle (uses GT)"):
+            self.segmenter.reset_stats()
+            data, _, candidates, _, _, _, _ = self.context(case, need_failure=False)
+            selected, actions = self._swap_actions(case, candidates)
+            knn = tuple(selected)
+            neighbors = [swapped_set(selected, a) for a in actions]
+            reachable = {knn, *neighbors}
+            remaining = [group for group in combinations(range(len(candidates)), 2) if group not in reachable]
+            masks = self._cached_swap_masks(case, data["image"], candidates, neighbors)
+            masks.update(self._cached_swap_masks(case, data["image"], candidates, remaining))
+            masks.update(self._cached_swap_masks(case, data["image"], candidates, [knn]))
+            truth = load_mask(case, self.cfg, data["original_size"])
+            scores = {group: dice(mask.numpy(), truth.numpy()) for group, mask in masks.items()}
+            best_step = max([knn, *neighbors], key=scores.get)
+            best_pair = max([best_step, *remaining], key=scores.get)
+            ids = [entry["case"]["case_id"] for entry in candidates]
+            rows.append(
+                dict(
+                    case_id=case.case_id,
+                    patient_id=case.patient_id,
+                    candidate_ids=ids,
+                    k=2,
+                    initial_support_ids=ids[:2],
+                    one_swap_or_keep_ids=[ids[i] for i in best_step],
+                    best_pair_ids=[ids[i] for i in best_pair],
+                    action_count=len(neighbors),
+                    pair_count=len(scores),
+                    initial_dice=scores[knn],
+                    one_swap_or_keep_dice=scores[best_step],
+                    best_pair_dice=scores[best_pair],
+                    one_swap_headroom=scores[best_step] - scores[knn],
+                    remaining_pair_headroom=scores[best_pair] - scores[best_step],
+                    segmentation_calls=self.segmenter.calls,
+                    pair_scores=[
+                        dict(support_ids=[ids[i] for i in group], dice=value)
+                        for group, value in scores.items()
+                    ],
+                )
+            )
+        path = (
+            Path(self.cfg["output"])
+            / "results"
+            / f"swap_oracle_val_k2_seed{self.cfg['seed']}_{digest(self.cfg)[:8]}"
+        )
+        write_json(
+            dict(
+                signature=self.signature_for("swap"),
+                manifest_hash=self.manifest_hash,
+                identity_scope=self.cfg["identity_scope"],
+                split=split,
+                uses_query_ground_truth=True,
+                protocol="all unordered pairs in the retrieved pool; single-swap oracle includes keeping KNN",
+                rows=rows,
+            ),
+            path / "swap_oracle.json",
+        )
+        write_json(
+            {
+                k: float(np.mean([r[k] for r in rows]))
+                for k in (
+                    "initial_dice",
+                    "one_swap_or_keep_dice",
+                    "best_pair_dice",
+                    "one_swap_headroom",
+                    "remaining_pair_headroom",
+                    "segmentation_calls",
+                )
+            },
+            path / "summary.json",
+        )
+        return path
+
+    @torch.no_grad()
     def oracle(self, split):
         rows = []
         for case in tqdm(self.queries(split), desc="Oracle diagnostic (uses GT)"):
@@ -477,9 +716,7 @@ def summarize(rows, identity_scope="patient"):
         "identity_scope": identity_scope,
         "hd95_undefined_cases": sum(r["hd95"] is None for r in rows),
     }
-    result["n_patients" if identity_scope == "patient" else "n_images"] = len(
-        {r["patient_id"] for r in rows}
-    )
+    result["n_patients" if identity_scope == "patient" else "n_images"] = len({r["patient_id"] for r in rows})
     for key in (
         "dice",
         "iou",
@@ -497,6 +734,10 @@ def summarize(rows, identity_scope="patient"):
         "support_evaluations",
         "peak_gpu_mb",
         "second_pass_gain",
+        "one_swap_regret",
+        "swap_accepted",
+        "swap_negative_if_accepted",
+        "swap_gain_error_if_accepted",
         "utility_at_k",
         "repair_fraction",
         "harm_fraction",

@@ -11,14 +11,26 @@ from .config import atomic_save, digest, read_tensor, seed_all, write_json
 from .retrieval import UtilityRanker, ranking_loss
 
 
-def _groups(path, pipeline, kind):
+def _groups(path, pipeline, kind, lookup):
     sample = read_tensor(path)
-    if kind != "correction":
+    if kind not in {"correction", "swap"}:
         return sample["groups"]
+
+    candidates = [lookup[case_id] for case_id in sample["candidate_ids"]]
+    if kind == "swap":
+        from .swap import swap_inputs
+
+        inputs = swap_inputs(
+            sample["query"],
+            candidates,
+            sample["regional_state"],
+            sample["selected"],
+            sample["actions"],
+            pipeline.cfg["feature_mode"],
+        )
+        return [{"x": inputs, "y": sample["deltas"].float(), "transitions": sample["transitions"]}]
     from .correction import correction_inputs
 
-    lookup = {entry["case"]["case_id"]: entry["features"] for entry in pipeline.bank.entries}
-    candidates = [lookup[case_id] for case_id in sample["candidate_ids"]]
     inputs = correction_inputs(
         sample["query"], candidates, sample["regional_state"], pipeline.cfg["feature_mode"]
     )
@@ -27,8 +39,17 @@ def _groups(path, pipeline, kind):
     return [{"x": inputs, "y": sample["targets"]}]
 
 
-def _loss_and_scores(model, x, y, cfg, kind):
-    outputs = model(x)
+def _loss_and_scores(model, group, cfg, kind):
+    outputs = model(group["x"].to(cfg["device"]))
+    y = group["y"].to(cfg["device"])
+    if kind == "swap":
+        from .swap import swap_loss
+
+        return (
+            swap_loss(outputs, group["transitions"].to(y.device), y, cfg["swap_transition_weight"]),
+            outputs[1],
+            y,
+        )
     if kind == "correction":
         from .correction import correction_loss
 
@@ -47,6 +68,8 @@ def checkpoint_path(pipeline, kind):
     keys = ("loss", "lr", "hidden_dim", "regression_weight")
     if kind == "correction":
         keys += ("correction_harm_weight",)
+    if kind == "swap":
+        keys = ("lr", "hidden_dim", "swap_transition_weight")
     train_id = digest({k: pipeline.cfg[k] for k in keys})[:12]
     return (
         Path(pipeline.cfg["output"])
@@ -83,13 +106,18 @@ def train(pipeline, kind, resume=False):
             raise ValueError(f"Incomplete {split} supervision; rerun generate")
     if patients["train"] & patients["val"]:
         raise ValueError("Patient leakage in ranker supervision")
-    example = _groups(paths["train"][0], pipeline, kind)[0]["x"]
+    lookup = {entry["case"]["case_id"]: entry["features"] for entry in pipeline.bank.entries}
+    input_dim = _groups(paths["train"][0], pipeline, kind, lookup)[0]["x"].shape[-1]
+    model_class = UtilityRanker
     if kind == "correction":
         from .correction import CorrectionRanker
 
-        model = CorrectionRanker(example.shape[-1], cfg["hidden_dim"]).to(device)
-    else:
-        model = UtilityRanker(example.shape[-1], cfg["hidden_dim"]).to(device)
+        model_class = CorrectionRanker
+    if kind == "swap":
+        from .swap import SwapRanker
+
+        model_class = SwapRanker
+    model = model_class(input_dim, cfg["hidden_dim"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"])
     best_path = checkpoint_path(pipeline, kind)
     last_path = best_path.with_name("last.pt")
@@ -101,6 +129,8 @@ def train(pipeline, kind, resume=False):
         keys = ("hidden_dim", "lr", "loss", "regression_weight")
         if kind == "correction":
             keys += ("correction_harm_weight",)
+        if kind == "swap":
+            keys = ("lr", "hidden_dim", "swap_transition_weight")
         for key in keys:
             if state["config"][key] != cfg[key]:
                 raise ValueError(f"Resume config mismatch: {key}")
@@ -113,18 +143,19 @@ def train(pipeline, kind, resume=False):
             state["history"],
         )
     for epoch in range(first_epoch, cfg["epochs"]):
+        if stale >= cfg["patience"]:
+            break
         order = list(paths["train"])
         random.Random(cfg["seed"] + epoch).shuffle(order)
         model.train()
         losses = []
         for path in tqdm(order, desc=f"Train {kind} {epoch + 1}/{cfg['epochs']}"):
-            groups = _groups(path, pipeline, kind)
+            groups = _groups(path, pipeline, kind, lookup)
             # One update per query: long marginal trajectories do not overweight a patient slice.
             optimizer.zero_grad(set_to_none=True)
             query_loss = 0.0
             for group in groups:
-                x, y = group["x"].to(device), group["y"].to(device)
-                loss, _, _ = _loss_and_scores(model, x, y, cfg, kind)
+                loss, _, _ = _loss_and_scores(model, group, cfg, kind)
                 loss = loss / len(groups)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"Nonfinite loss: {path}")
@@ -135,14 +166,18 @@ def train(pipeline, kind, resume=False):
             losses.append(query_loss)
         model.eval()
         validation, regrets = [], []
+        swap_choices = []
         with torch.no_grad():
             for path in paths["val"]:
                 group_losses, group_regrets = [], []
-                for group in _groups(path, pipeline, kind):
-                    x, y = group["x"].to(device), group["y"].to(device)
-                    loss, scores, utilities = _loss_and_scores(model, x, y, cfg, kind)
+                for group in _groups(path, pipeline, kind, lookup):
+                    loss, scores, utilities = _loss_and_scores(model, group, cfg, kind)
                     group_losses.append(float(loss))
                     group_regrets.append(float(utilities.max() - utilities[scores.argmax()]))
+                    if kind == "swap":
+                        swap_choices.append(
+                            (float(scores.max()), float(utilities[scores.argmax()]), float(utilities.max()))
+                        )
                 validation.append(float(np.mean(group_losses)))
                 regrets.append(float(np.mean(group_regrets)))
         val = float(np.mean(validation))
@@ -156,13 +191,28 @@ def train(pipeline, kind, resume=False):
             val_loss=val,
             val_selection_regret=float(np.mean(regrets)),
         )
+        if kind == "swap":
+            # Each validation query contributes its best predicted action or a no-op.
+            gain, threshold = max(
+                (
+                    sum(actual if predicted > t else 0 for predicted, actual, _ in swap_choices)
+                    / len(swap_choices),
+                    t,
+                )
+                for t in (0.0, 0.005, 0.01, 0.02)
+            )
+            log.update(
+                swap_threshold=threshold,
+                val_selected_delta_dice=gain,
+                val_selection_regret=float(np.mean([max(0.0, best) for _, _, best in swap_choices])) - gain,
+            )
         history.append(log)
         print(log, flush=True)
         state = dict(
             model=model.state_dict(),
             optimizer=optimizer.state_dict(),
             epoch=epoch,
-            input_dim=example.shape[-1],
+            input_dim=input_dim,
             hidden_dim=cfg["hidden_dim"],
             kind=kind,
             signature=pipeline.signature_for(kind),
@@ -171,12 +221,12 @@ def train(pipeline, kind, resume=False):
             history=history,
             config=cfg,
         )
-        atomic_save(state, last_path)
+        if kind == "swap":
+            state["swap_threshold"] = log["swap_threshold"]
         if improved:
             atomic_save(state, best_path)
+        atomic_save(state, last_path)
         write_json(history, best_path.with_name("history.json"))
-        if stale >= cfg["patience"]:
-            break
     if not best_path.exists():
         raise RuntimeError("No valid best checkpoint produced")
     return best_path

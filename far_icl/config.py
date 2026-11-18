@@ -59,6 +59,8 @@ DEFAULTS = dict(
     correction_harm_weight=1.0,
     correction_uncertainty_weight=0.0,
     correction_cost=0.001,
+    swap_transition_weight=1.0,
+    swap_threshold=None,
 )
 
 
@@ -107,6 +109,11 @@ def load_config(path, overrides=()):
     if cfg["correction_grid"] not in {1, 2, 4, 8, 16}:
         raise ValueError("correction_grid must be one of 1,2,4,8,16")
     for key in ("correction_harm_weight", "correction_uncertainty_weight", "correction_cost"):
+        if not np.isfinite(cfg[key]) or cfg[key] < 0:
+            raise ValueError(f"{key} must be finite and nonnegative")
+    for key in ("swap_transition_weight", "swap_threshold"):
+        if key == "swap_threshold" and cfg[key] is None:
+            continue
         if not np.isfinite(cfg[key]) or cfg[key] < 0:
             raise ValueError(f"{key} must be finite and nonnegative")
     return cfg

@@ -16,17 +16,29 @@ METHODS = [
     "repair",
     "repair_cover",
     "repair_adaptive",
+    "swap",
 ]
 
 
 def main():
     parser = argparse.ArgumentParser(description="FAR-ICL medical segmentation")
     parser.add_argument(
-        "command", choices=["check-data", "bank", "generate", "train", "evaluate", "oracle", "run", "report"]
+        "command",
+        choices=[
+            "check-data",
+            "bank",
+            "generate",
+            "train",
+            "evaluate",
+            "oracle",
+            "swap-oracle",
+            "run",
+            "report",
+        ],
     )
     parser.add_argument("--config", default="configs/isic.yaml")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--kind", choices=["utility", "marginal", "correction"], default="utility")
+    parser.add_argument("--kind", choices=["utility", "marginal", "correction", "swap"], default="utility")
     parser.add_argument("--method", choices=METHODS, default="knn")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
     parser.add_argument("--checkpoint")
@@ -63,6 +75,8 @@ def main():
         print(train(pipeline, args.kind, args.resume))
     elif args.command == "oracle":
         pipeline.oracle(args.split)
+    elif args.command == "swap-oracle":
+        print(pipeline.swap_oracle(args.split))
     elif args.command == "evaluate":
         kind = ranker_kind(args.method)
         checkpoint = args.checkpoint or checkpoint_path(pipeline, kind)
