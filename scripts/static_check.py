@@ -7,13 +7,14 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 python_files = (
-    list((root / "far_icl").glob("*.py"))
+    list((root / "far_icl").rglob("*.py"))
+    + list((root / "experiments" / "baselines").rglob("*.py"))
     + list((root / "scripts").glob("*.py"))
     + list((root / "tests").glob("*.py"))
 )
 for path in python_files:
     ast.parse(path.read_text(), filename=str(path))
-for path in (root / "scripts").glob("*.sh"):
+for path in [*(root / "scripts").glob("*.sh"), *(root / "experiments" / "baselines").rglob("*.sh")]:
     subprocess.run(["bash", "-n", str(path)], check=True)
 subprocess.run(["git", "diff", "--check"], cwd=root, check=True)
 subprocess.run(["git", "diff", "--cached", "--check"], cwd=root, check=True)

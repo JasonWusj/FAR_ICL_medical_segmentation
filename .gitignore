@@ -11,4 +11,5 @@ external/
 *.pth
 *.ckpt
 .DS_Store
-/docs/
+/docs/*
+!/docs/BASELINE_EXPERIMENT_MANUAL.md

@@ -73,9 +73,13 @@ class Pipeline:
             "segmenter",
             "tyche_samples",
         )
+        self.segmenter_sha256 = h.hexdigest()
         self.signature = digest(
             dict(
-                bank=self.bank.signature, segmenter=h.hexdigest(), config={k: cfg[k] for k in keys}, schema=1
+                bank=self.bank.signature,
+                segmenter=self.segmenter_sha256,
+                config={k: cfg[k] for k in keys},
+                schema=1,
             )
         )
         self.artifacts = Path(cfg["output"]) / "supervision" / self.signature[:20]

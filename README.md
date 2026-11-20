@@ -2,6 +2,7 @@
 
 当前主方法在固定支持数下学习一次病例替换。冻结 ResNet50 和 UniverSeg，由评分器预测区域转移和替换后的 ΔDice，保留原集合也是可选动作。
 运行方法见[单步替换实验命令](experiments/README.md#单步替换实验)。
+冻结 UniverSeg 的 Random、KNN、标准 MMR 和 Dual Similarity Adapted 对照见 [Baseline 实验手册](docs/BASELINE_EXPERIMENT_MANUAL.md)。
 
 **验证状态**　本地已用合成数据检查固定 K 替换的训练、推理和穷举流程。该方法在 ISIC 上的分割效果仍待服务器实验验证。
 运行前需要自行准备有权限使用的数据、患者元信息和 Linux 环境。此项目不能保证未实际执行的 GPU 兼容性或算法提升。

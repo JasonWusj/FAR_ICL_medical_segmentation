@@ -124,6 +124,4 @@ def load_mask(case, cfg, original_size=None):
         mask = mask > 0
     else:
         mask = np.isin(mask, values)
-    return F.interpolate(
-        torch.from_numpy(mask.astype(np.float32))[None, None], (128, 128), mode="nearest"
-    )[0]
+    return F.interpolate(torch.from_numpy(mask.astype(np.float32))[None, None], (128, 128), mode="nearest")[0]
